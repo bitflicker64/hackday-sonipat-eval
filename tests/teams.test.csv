@@ -1,0 +1,12 @@
+Team ID,Problem Statement,GitHub Repo
+T01,1,https://github.com/ollama/ollama-python
+T02,8,https://github.com/google-gemini/gemma-cookbook.git
+T03,2,https://github.com/huggingface/smollm
+Team Alpha #3,3,https://github.com/OCTOCAT/Spoon-Knife/
+T05,4,https://www.github.com/octocat/git-consortium/tree/master
+T06,5,https://github.com/torvalds/linux
+T08,7,git@github.com:ollama/ollama-python.git
+T09,1,https://github.com/bitflicker64/this-repo-does-not-exist-xyz
+T10,2,https://gitlab.com/someone/repo
+,3,https://github.com/octocat/linguist
+Team-Alpha-3,4,https://github.com/octocat/linguist

@@ -1,0 +1,13 @@
+{
+  "record_from": "2026-10-31T22:00:00",
+  "freeze_at": "2026-11-01T06:30:00",
+  "teams_csv": "teams.csv",
+  "data_dir": "data",
+  "workers": 8,
+  "git_timeout_s": 600,
+  "max_clone_mb": 1500,
+  "min_free_gb": 5,
+  "github_api": true,
+  "max_text_file_bytes": 1000000,
+  "skip_dirs": ["node_modules", "dist", "build", ".venv", "venv", "vendor", "__pycache__", ".next", "target", ".git"]
+}

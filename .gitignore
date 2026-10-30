@@ -1,0 +1,6 @@
+teams.csv
+data/
+tests/data/
+design-notes.md
+__pycache__/
+.DS_Store

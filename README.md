@@ -15,8 +15,7 @@ and it spends no Claude tokens on reviewing. The review stage after 6:30 is a se
 A second Mac can record the same night independently, so a sleeping laptop or a dropped Wi-Fi
 connection on one machine does not cost us the freeze. `AGENTS.md` holds the full setup steps.
 
-1. Get access to this repo (it is private; ask for a collaborator invite).
-2. In the Claude desktop app, open the Code tab, start a session in any folder, and paste:
+1. In the Claude desktop app, open the Code tab, start a session in any folder, and paste:
 
    ```text
    Clone the GitHub repo bitflicker64/hackday-sonipat-eval into ~/hackday-sonipat-eval using gh,
@@ -25,8 +24,8 @@ connection on one machine does not cost us the freeze. `AGENTS.md` holds the ful
    reach that step.
    ```
 
-3. Give it the same `teams.csv` the primary Mac uses when it asks.
-4. Keep that Mac awake, plugged in and with the lid open from 9:45 PM to 6:45 AM, with the
+2. Give it the same `teams.csv` the primary Mac uses when it asks.
+3. Keep that Mac awake, plugged in and with the lid open from 9:45 PM to 6:45 AM, with the
    Claude app open.
 
 ## Schedule
@@ -81,7 +80,9 @@ Disable it after the freeze.
 - `teams.csv` headers like "Team ID", "Problem Statement", "GitHub Repo"; team IDs with spaces or `#`
   (files use a safe name, and two IDs that map to the same name are rejected); blank or duplicate
   IDs and non-GitHub links rejected into `teams_rejected.csv`.
-- Links with `.git`, `www.`, `http://`, SSH form, a trailing slash, or `/tree/<branch>`.
+- Links in any letter case, with or without `https://`, with `.git`, `www.`, SSH form, a trailing
+  slash, or `/tree/<branch>`. Unlisted headers are matched on a key word ("team", "problem",
+  "github" or "repo"). Team IDs over 60 characters are rejected. Rejected rows print a WARNING.
 - Two teams on one repo (`shared_repo_with`); a team switching repos mid-night (re-cloned,
   `repo_changed_from`, not reported as a force push).
 - This Mac's git logins are ignored, so a private repo is never mistaken for a public one.
@@ -92,6 +93,12 @@ Disable it after the freeze.
 - "You are an AI assistant…" system prompts are not flagged; only text aimed at judges or scores is.
 - File names with unicode, quotes or tabs.
 - Overlapping runs: a second round is skipped; the freeze reads HEADs at once, then waits for the round.
+- The freeze: `freeze.csv` is written straight after the HEAD reads, before any clone, so a crash
+  later in the round cannot lose it. HEADs that fail on network errors are retried after 15, 30
+  and 60 seconds first. A second freeze can never overwrite the first, even if two run at once.
+- A failed GitHub API call records CI as `unknown` (not `none`) and direct pushes as `unknown`.
+- A fetch that fails on branch names differing only in case still fetches the frozen commit.
+- CSV cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so spreadsheets do not run them.
 
 ## Not handled here (for the review stage)
 

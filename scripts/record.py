@@ -28,9 +28,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Case-insensitive, scheme optional: phones capitalise "Https://", people paste "github.com/a/b".
 GITHUB_URL = re.compile(
-    r"^(?:https?://(?:www\.)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
-    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?(?:[/?#].*)?$"
+    r"^(?:(?:https?://)?(?:www\.)?github\.com/|git@github\.com:|ssh://git@github\.com/)"
+    r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?(?:[/?#].*)?$",
+    re.I,
 )
 
 TEST_FILE = re.compile(
@@ -168,6 +170,10 @@ HEADER_ALIASES = {
 }
 
 
+HEADER_WORDS = {"team_id": ("team",), "problem": ("problem", "track"), "repo_url": ("github", "repo")}
+MAX_TEAM_ID = 60
+
+
 def file_key(team_id):
     """A team id safe to use in a file name: "Team Alpha #3" becomes "Team-Alpha-3"."""
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", team_id).strip("-.") or "team"
@@ -185,9 +191,18 @@ def load_teams(cfg):
             row = {}
             for field, names in HEADER_ALIASES.items():
                 row[field] = next((raw[n] for n in names if raw.get(n)), "")
+                if not row[field]:
+                    # Unlisted headers such as "GitHub Repository Link": match on a key word.
+                    words = HEADER_WORDS[field]
+                    row[field] = next((v for k, v in raw.items() if v and any(w in k for w in words)), "")
             tid, url = row["team_id"], row["repo_url"]
             if not tid:
                 rejected.append({"line": i, "team_id": "", "repo_url": url, "reason": "no team_id"})
+                continue
+            # Ids end up in reports a scheduled Claude session reads: keep them short and plain.
+            tid = re.sub(r"[\x00-\x1f\x7f]", " ", tid).strip()
+            if len(tid) > MAX_TEAM_ID:
+                rejected.append({"line": i, "team_id": tid[:MAX_TEAM_ID] + "...", "repo_url": url, "reason": f"team_id over {MAX_TEAM_ID} characters"})
                 continue
             if tid in seen_ids:
                 rejected.append({"line": i, "team_id": tid, "repo_url": url, "reason": "duplicate team_id"})
@@ -304,6 +319,7 @@ def github_facts(team, sha, api_dir):
             "open": sum(1 for p in prs if p["state"] == "open"),
             "with_models_section": sum(1 for p in prs if p["models_section"]),
             "truncated_at": len(prs) if truncated else None,
+            "complete": not any(k.startswith("pulls-") for k in errors),
             "items": sorted(prs, key=lambda p: p["number"] or 0),
         }
 
@@ -311,6 +327,9 @@ def github_facts(team, sha, api_dir):
         runs = fetch("check_runs", f"repos/{slug}/commits/{sha}/check-runs?per_page=100")
         status = fetch("status", f"repos/{slug}/commits/{sha}/status")
         facts["ci"] = ci_summary(runs, status)
+        if "check_runs" in errors or "status" in errors:
+            # A failed API call is not "no CI".
+            facts["ci"]["state"] = facts["ci"]["all_checks_state"] = "unknown"
 
     return facts, errors
 
@@ -374,7 +393,7 @@ def ls_remote(team, timeout, attempts=3):
             return None, None, f"ls-remote failed after {attempts} tries: {err.strip()[:200]}"
         time.sleep(3 * (attempt + 1))
     branch, sha = None, None
-    for line in p.stdout.decode().splitlines():
+    for line in p.stdout.decode(errors="replace").splitlines():
         if line.startswith("ref:"):
             branch = line.split()[1].replace("refs/heads/", "")
         elif line.endswith("\tHEAD"):
@@ -384,15 +403,25 @@ def ls_remote(team, timeout, attempts=3):
     return branch, sha, None
 
 
-def sync_mirror(team, mirror, timeout):
+def has_commit(mirror, sha):
+    return git(mirror, "cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode == 0
+
+
+def sync_mirror(team, mirror, timeout, sha):
     """Bare clone on first sight, fetch afterwards. Only branches and tags, never a work tree.
     Returns what it did; a team that changed its repo URL gets a fresh clone."""
     action = "cloned"
     if (mirror / "HEAD").exists():
         origin = git(mirror, "config", "--get", "remote.origin.url", check=False).stdout.decode().strip()
         if origin.lower() == team["clone_url"].lower():
-            git(mirror, "fetch", "--quiet", "--prune", "--tags", "origin", timeout=timeout)
-            return "fetched"
+            p = git(mirror, "fetch", "--quiet", "--prune", "--tags", "origin", timeout=timeout, check=False)
+            if p.returncode == 0:
+                return "fetched"
+            # A ref fetch can fail on its own (branches "dev" and "Dev" collide on macOS's
+            # case-insensitive disk); the commit we need can still be fetched by its SHA.
+            if not has_commit(mirror, sha):
+                git(mirror, "fetch", "--quiet", "origin", sha, timeout=timeout)
+            return "fetched by SHA (" + p.stderr.decode(errors="replace").strip()[:120] + ")"
         action = f"recloned (repo changed from {origin})"
     if mirror.exists():
         shutil.rmtree(mirror)
@@ -513,7 +542,8 @@ def tree_facts(cfg, mirror, sha):
     for entry in models.values():
         entry["names"] = sorted(entry["names"])[:10]
 
-    workflows = [f for f in files if re.match(r"^\.github/workflows/[^/]+\.ya?ml$", f["path"])]
+    workflows = [f for f in files if re.match(r"^\.github/workflows/[^/]+\.ya?ml$", f["path"])
+                 and f["size"] <= cfg["max_text_file_bytes"]][:50]
     wf_text = read_blobs(mirror, workflows)
     wf = []
     for f in workflows:
@@ -528,7 +558,7 @@ def tree_facts(cfg, mirror, sha):
     license_files = [p for p in paths if LICENSE_FILE.match(p)]
     license_kind = None
     if license_files:
-        lt = read_blobs(mirror, [f for f in files if f["path"] == license_files[0]])
+        lt = read_blobs(mirror, [f for f in files if f["path"] == license_files[0] and f["size"] <= cfg["max_text_file_bytes"]])
         body = lt.get(license_files[0], b"").decode(errors="replace")
         if "Permission is hereby granted, free of charge" in body:
             license_kind = "MIT"
@@ -652,14 +682,15 @@ def record_team(cfg, team, round_dir, previous, head):
 
     if facts["status"] == "ok":
         try:
-            facts["mirror"] = sync_mirror(team, mirror, cfg["git_timeout_s"])
-            if git(mirror, "cat-file", "-e", f"{sha}^{{commit}}", check=False).returncode != 0:
+            facts["mirror"] = sync_mirror(team, mirror, cfg["git_timeout_s"], sha)
+            if not has_commit(mirror, sha):
                 raise RuntimeError(f"{sha[:10]} missing after fetch")
         except Exception as e:  # clone or fetch failed: still record what we know
             facts["status"], facts["reason"] = "fetch_failed", str(e)[:300]
 
     if facts["status"] == "ok":
-        merge_shas = {p["merge_commit_sha"] for p in facts.get("github", {}).get("prs", {}).get("items", []) if p.get("merge_commit_sha")}
+        prs = facts.get("github", {}).get("prs") or {}
+        merge_shas = {p["merge_commit_sha"] for p in prs.get("items", []) if p.get("merge_commit_sha")}
         for name, fn in (
             ("history", lambda: history_facts(mirror, sha, branch, merge_shas)),
             ("tree", lambda: tree_facts(cfg, mirror, sha)),
@@ -668,6 +699,9 @@ def record_team(cfg, team, round_dir, previous, head):
                 facts[name] = fn()
             except Exception as e:
                 facts["errors"][name] = str(e)[:300]
+        if "history" in facts:
+            # Without the full PR list, squash merges look like direct pushes.
+            facts["history"]["direct_pushes_reliable"] = bool(prs.get("complete")) and not prs.get("truncated_at")
         if facts.get("history", {}).get("commit_count") == 1:
             facts["status"], facts["reason"] = "init_only", "only the init commit"
 
@@ -713,7 +747,7 @@ def summary_row(f):
         "changed": f.get("changed_since_last_round", ""),
         "rewritten": f.get("history_rewritten", ""),
         "commits": h.get("commit_count", ""),
-        "direct_pushes": h.get("direct_pushes", ""),
+        "direct_pushes": h.get("direct_pushes", "") if h.get("direct_pushes_reliable", True) else "unknown",
         "prs": gh.get("prs", {}).get("count", ""),
         "prs_merged": gh.get("prs", {}).get("merged", ""),
         "prs_models_section": gh.get("prs", {}).get("with_models_section", ""),
@@ -734,11 +768,18 @@ def summary_row(f):
     }
 
 
+def cell(v):
+    """Team-written text such as "=HYPERLINK(...)" must not run as a formula in Sheets or Excel."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + v
+    return v
+
+
 def write_csv(path, rows, columns):
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
         w.writeheader()
-        w.writerows(rows)
+        w.writerows({k: cell(v) for k, v in r.items()} for r in rows)
 
 
 def load_previous(data_dir):
@@ -793,10 +834,17 @@ def write_freeze(cfg, teams, heads, round_id):
             "reason": err or "",
             "round": round_id,
         })
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f".freeze.{os.getpid()}.tmp")
+    if tmp.exists():
+        tmp.unlink()
     write_csv(tmp, rows, ["team_id", "problem", "repo_url", "sha", "default_branch", "seen_at", "status", "reason", "round"])
     os.chmod(tmp, 0o444)
-    os.replace(tmp, path)
+    try:
+        os.link(tmp, path)  # fails if freeze.csv exists: two freezes at once can never overwrite
+    except FileExistsError:
+        sys.exit(f"{path} already exists; the freeze happens once. This run's HEADs were not written.")
+    finally:
+        tmp.unlink()
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     (cfg["data_dir"] / "freeze.sha256").write_text(f"{digest}  freeze.csv\n")
     return path, digest
@@ -821,17 +869,36 @@ def main():
     if args.only:
         wanted = set(args.only.split(","))
         teams = [t for t in teams if t["team_id"] in wanted]
+    if not teams:
+        sys.exit(f"no usable rows in {cfg['teams_csv']} ({len(rejected)} rejected); check its headers and URLs. Nothing recorded.")
+    if rejected:
+        print(f"WARNING: {len(rejected)} rows of teams.csv were rejected and are not recorded; "
+              f"see teams_rejected.csv in the round folder", flush=True)
 
     started = now()
     # Every HEAD is read first, all at once and before taking the lock, so a round (above all
     # the freeze) pins each repo within seconds of its start, even if an earlier round is
     # still fetching. ls-remote touches nothing on disk.
     def head(team):
-        branch, sha, err = ls_remote(team, 60)
+        try:
+            branch, sha, err = ls_remote(team, 60)
+        except Exception as e:  # one odd repo must never stop the HEAD reads, or the freeze
+            branch, sha, err = None, None, f"ls-remote error: {str(e)[:200]}"
         return team["team_id"], (branch, sha, err, iso(now()))
 
     with ThreadPoolExecutor(max_workers=32) as pool:
         heads = dict(pool.map(head, teams))
+    if args.final:
+        # The freeze is written once, so a Wi-Fi or DNS drop at 6:30 gets about two minutes
+        # to clear before a team is frozen as unreachable. "Not found or private" is final.
+        for wait in (15, 30, 60):
+            retry = [t for t in teams if (heads[t["team_id"]][2] or "").startswith(("ls-remote failed", "ls-remote error"))]
+            if not retry:
+                break
+            print(f"  {len(retry)} HEADs failed on network errors; retrying in {wait}s", flush=True)
+            time.sleep(wait)
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                heads.update(pool.map(head, retry))
     print(f"  {sum(1 for h in heads.values() if h[1])}/{len(teams)} HEADs read in "
           f"{round((now() - started).total_seconds(), 1)}s", flush=True)
     round_id = ("final-" if args.final else "r-") + started.strftime("%Y%m%dT%H%M%S")
